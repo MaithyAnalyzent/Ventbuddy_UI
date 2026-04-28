@@ -361,10 +361,13 @@ async def chat_voice(
 async def list_sessions(user: dict = Depends(current_user), q: Optional[str] = None):
     query = {"user_id": user["id"]}
     if q:
-        query["$or"] = [
-            {"title": {"$regex": q, "$options": "i"}},
-            {"last_message": {"$regex": q, "$options": "i"}},
-        ]
+        import re as _re
+        safe = _re.escape(q.strip())
+        if safe:
+            query["$or"] = [
+                {"title": {"$regex": safe, "$options": "i"}},
+                {"last_message": {"$regex": safe, "$options": "i"}},
+            ]
     docs = await db.sessions.find(query, {"_id": 0}).sort("updated_at", -1).to_list(200)
     return docs
 
@@ -393,8 +396,10 @@ async def get_messages(session_id: str, user: dict = Depends(current_user)):
 
 @api.delete("/chat/sessions/{session_id}")
 async def delete_session(session_id: str, user: dict = Depends(current_user)):
+    res = await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
     await db.messages.delete_many({"user_id": user["id"], "session_id": session_id})
-    await db.sessions.delete_one({"id": session_id, "user_id": user["id"]})
     return {"ok": True}
 
 

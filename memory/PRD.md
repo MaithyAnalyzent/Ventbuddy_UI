@@ -40,6 +40,17 @@ Build an AI Mental Wellness Agent that supports users emotionally through intell
 - ✅ Earthy organic design system (sage/sand/terracotta), Outfit + DM Sans, Phosphor duotone icons
 - ✅ 50/50 backend tests passing
 
+## Iteration 2 (2026-04-28)
+- ✅ **Humanized AI prompts** — rewrote PROFESSIONAL_SYSTEM and GENZ_SYSTEM to actively forbid robotic openers ("I'm sorry to hear", "It sounds like you're feeling"), enforce real-friend tone, length-matched replies, contractions, follow-up curiosity over advice lists.
+- ✅ **Chat history sidebar** with auto-titled sessions (from first user message), search (regex-escaped), rename (PATCH /api/chat/sessions/:id), delete (consistent 404 on non-owned).
+- ✅ **New conversation button** — always available, resets context cleanly.
+- ✅ **Redesigned Talk tab** — full-height viewport, sticky composer, larger message bubbles (15px / 1.65 line-height), auto-growing textarea, animated typing indicator, mobile drawer for sidebar.
+- ✅ **Telegram bot VentBuddy** (@VentBuddyBot) — long-polling integration with python-telegram-bot 22.7. Commands: /start, /new, /mode pro|genz, /voice on|off, /checkin, /help. Supports text + voice notes (Whisper STT) with optional TTS voice replies (Opus). Each Telegram user gets a linked Mindful user record (`tg_<id>@telegram.local`) with persistent session state.
+- ✅ **Multi-channel sessions** — sessions tagged with `channel` field (web | telegram); UI shows 📱 prefix for Telegram-originated chats.
+- ✅ **GET /api/integrations/telegram** returns bot username for web → Telegram deep link.
+- ✅ Dashboard "Available on Telegram" callout with Open in Telegram CTA.
+- ✅ 59/59 backend tests passing (50 regression + 9 new).
+
 ## Backlog (P0/P1/P2)
 ### P1
 - ElevenLabs voice option for richer TTS character
