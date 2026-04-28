@@ -476,12 +476,22 @@ async def list_habits(user: dict = Depends(current_user)):
             {"_id": 0},
         )
         h["completed_today"] = bool(log and log.get("completed"))
-        # Streak count (consecutive days completed)
+        # Consecutive-day streak (walking back from today/yesterday)
         logs = await db.habit_logs.find(
             {"habit_id": h["id"], "user_id": user["id"], "completed": True},
             {"_id": 0, "log_date": 1},
-        ).sort("log_date", -1).to_list(60)
-        h["streak"] = len(logs)
+        ).sort("log_date", -1).to_list(365)
+        completed_dates = {l["log_date"] for l in logs}
+        from datetime import timedelta
+        streak = 0
+        cursor = date.today()
+        # Allow streak to start at today OR yesterday (so it doesn't reset before user logs today)
+        if cursor.isoformat() not in completed_dates:
+            cursor = cursor - timedelta(days=1)
+        while cursor.isoformat() in completed_dates:
+            streak += 1
+            cursor = cursor - timedelta(days=1)
+        h["streak"] = streak
     return docs
 
 
