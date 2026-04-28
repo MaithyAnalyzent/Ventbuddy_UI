@@ -310,6 +310,7 @@ class TestHabits:
         habits = r.json()
         h = next(x for x in habits if x["id"] == TestHabits.HABIT_ID["id"])
         assert h["completed_today"] is False
+        # New consecutive-day streak: a fresh habit with no logs should be 0
         assert h["streak"] == 0
 
     def test_log_habit_complete(self, fresh_user_session):
@@ -322,7 +323,20 @@ class TestHabits:
         habits = fresh_user_session.get(f"{API}/habits", timeout=15).json()
         h = next(x for x in habits if x["id"] == TestHabits.HABIT_ID["id"])
         assert h["completed_today"] is True
-        assert h["streak"] >= 1
+        # New consecutive-day streak: after one log_today=True, streak should be exactly 1
+        assert h["streak"] == 1
+
+    def test_log_habit_same_day_idempotent_streak(self, fresh_user_session):
+        # Two logs on same day must still count as streak=1
+        r = fresh_user_session.post(f"{API}/habits/log", json={
+            "habit_id": TestHabits.HABIT_ID["id"],
+            "completed": True,
+        }, timeout=15)
+        assert r.status_code == 200
+        habits = fresh_user_session.get(f"{API}/habits", timeout=15).json()
+        h = next(x for x in habits if x["id"] == TestHabits.HABIT_ID["id"])
+        assert h["streak"] == 1
+        assert h["completed_today"] is True
 
     def test_log_habit_toggle_off(self, fresh_user_session):
         r = fresh_user_session.post(f"{API}/habits/log", json={
@@ -426,3 +440,139 @@ class TestUnauthEnforcement:
         assert r.status_code == 401, (
             f"{method} {path} expected 401, got {r.status_code}: {r.text[:200]}"
         )
+
+
+# -------- Iteration 2: Chat session titles, rename, search, channel --------
+class TestChatSessionsV2:
+    """New session lifecycle: title auto-generated from first message,
+    PATCH rename, GET search via q, channel field, and ownership."""
+
+    def _new_user(self):
+        s = requests.Session()
+        email = f"test_{uuid.uuid4().hex[:10]}@example.com"
+        r = s.post(f"{API}/auth/register", json={
+            "email": email, "password": "TestPass@123", "name": "V2 User",
+        }, timeout=30)
+        assert r.status_code == 200, r.text
+        s._email = email
+        return s
+
+    def test_first_message_sets_auto_title(self):
+        s = self._new_user()
+        first_msg = "Today was a really really long day and I feel exhausted from work"
+        r = s.post(f"{API}/chat/send", json={
+            "text": first_msg, "mode": "professional",
+        }, timeout=90)
+        assert r.status_code == 200, r.text
+        sid = r.json()["session_id"]
+
+        # Find session in listing & verify title auto-generated
+        sessions = s.get(f"{API}/chat/sessions", timeout=15).json()
+        sess = next((x for x in sessions if x["id"] == sid), None)
+        assert sess is not None
+        assert sess.get("title"), f"title missing: {sess}"
+        # auto_title takes first ~48 chars and adds ellipsis if longer
+        assert sess["title"].startswith("Today was a really really")
+        # channel should be web for web-created sessions
+        assert sess.get("channel") == "web"
+        # store for next tests
+        TestChatSessionsV2.SID = sid
+        TestChatSessionsV2.SESSION_TOKEN = s
+
+    def test_rename_session_success(self):
+        s = TestChatSessionsV2.SESSION_TOKEN
+        sid = TestChatSessionsV2.SID
+        r = s.patch(f"{API}/chat/sessions/{sid}",
+                    json={"title": "TEST_ My Renamed Chat"}, timeout=15)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d.get("ok") is True
+        assert d.get("title") == "TEST_ My Renamed Chat"
+        # verify persisted in listing
+        sessions = s.get(f"{API}/chat/sessions", timeout=15).json()
+        sess = next((x for x in sessions if x["id"] == sid), None)
+        assert sess is not None and sess["title"] == "TEST_ My Renamed Chat"
+
+    def test_rename_session_empty_title_400(self):
+        s = TestChatSessionsV2.SESSION_TOKEN
+        sid = TestChatSessionsV2.SID
+        r = s.patch(f"{API}/chat/sessions/{sid}", json={"title": "   "}, timeout=15)
+        assert r.status_code == 400
+
+    def test_rename_session_not_found_404(self):
+        s = TestChatSessionsV2.SESSION_TOKEN
+        r = s.patch(f"{API}/chat/sessions/does-not-exist-{uuid.uuid4().hex}",
+                    json={"title": "x"}, timeout=15)
+        assert r.status_code == 404
+
+    def test_rename_session_other_user_404(self):
+        # User B creates a session, then User A tries to rename → 404 (ownership)
+        owner = self._new_user()
+        r = owner.post(f"{API}/chat/send", json={
+            "text": "Owner only message about gardening", "mode": "professional",
+        }, timeout=90)
+        assert r.status_code == 200
+        owner_sid = r.json()["session_id"]
+
+        attacker = self._new_user()
+        r2 = attacker.patch(f"{API}/chat/sessions/{owner_sid}",
+                            json={"title": "hacked"}, timeout=15)
+        assert r2.status_code == 404, f"expected 404 ownership, got {r2.status_code}: {r2.text}"
+
+        # And attacker cannot delete either
+        r3 = attacker.delete(f"{API}/chat/sessions/{owner_sid}", timeout=15)
+        # delete returns 200 but should be a no-op; verify owner still has session
+        owner_sessions = owner.get(f"{API}/chat/sessions", timeout=15).json()
+        assert any(x["id"] == owner_sid for x in owner_sessions), \
+            "Attacker delete should not have removed owner's session"
+
+    def test_search_sessions_q_param(self):
+        s = TestChatSessionsV2.SESSION_TOKEN
+        # The session has been renamed to "TEST_ My Renamed Chat"
+        r = s.get(f"{API}/chat/sessions", params={"q": "renamed"}, timeout=15)
+        assert r.status_code == 200
+        results = r.json()
+        assert isinstance(results, list)
+        ids = [x["id"] for x in results]
+        assert TestChatSessionsV2.SID in ids, f"search did not return renamed session: {results}"
+        # negative
+        r2 = s.get(f"{API}/chat/sessions", params={"q": "zzznotexisting_xyz"}, timeout=15)
+        assert r2.status_code == 200
+        ids2 = [x["id"] for x in r2.json()]
+        assert TestChatSessionsV2.SID not in ids2
+
+
+# -------- Iteration 2: AI tone (humanized) --------
+class TestAITone:
+    BANNED_OPENERS = (
+        "i'm sorry to hear",
+        "i am sorry to hear",
+        "it sounds like you",
+        "that must be really hard",
+    )
+
+    def test_reply_does_not_use_robotic_openers(self, fresh_user_session):
+        r = fresh_user_session.post(f"{API}/chat/send", json={
+            "text": "I had a really rough day at work",
+            "mode": "professional",
+        }, timeout=90)
+        assert r.status_code == 200, r.text
+        reply = (r.json().get("reply") or "").strip().lower()
+        assert reply, "empty reply"
+        for opener in TestAITone.BANNED_OPENERS:
+            assert not reply.startswith(opener), (
+                f"Robotic opener detected: '{opener}'. Reply was: {reply[:200]}"
+            )
+
+
+# -------- Iteration 2: Telegram public info --------
+class TestTelegramInfo:
+    def test_telegram_info_public(self):
+        # Endpoint is public (no auth)
+        r = requests.get(f"{API}/integrations/telegram", timeout=15)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d.get("enabled") is True, f"Telegram not enabled: {d}"
+        assert d.get("name") == "VentBuddy"
+        assert d.get("username") == "VentBuddyBot"
+        assert d.get("url") == "https://t.me/VentBuddyBot"

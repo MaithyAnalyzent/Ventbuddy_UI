@@ -29,7 +29,9 @@ from ai_service import (
     get_system_message, generate_chat_response,
     transcribe_audio, synthesize_speech,
     get_journal_prompts, get_crisis_resources,
+    auto_title,
 )
+from telegram_bot import build_application as build_tg_app
 
 
 # ---- DB ----
@@ -249,14 +251,19 @@ async def chat_send(payload: ChatIn, user: dict = Depends(current_user)):
         "created_at": now_iso(),
     })
 
-    # Upsert session metadata
+    # Upsert session metadata; set title from first user message
+    existing_session = await db.sessions.find_one({"id": session_id, "user_id": user["id"]}, {"_id": 0, "title": 1})
+    set_fields = {
+        "id": session_id, "user_id": user["id"], "mode": payload.mode,
+        "last_message": reply[:160], "last_emotion": emotion,
+        "updated_at": now_iso(), "channel": "web",
+    }
+    set_on_insert = {"created_at": now_iso(), "title": auto_title(payload.text)}
+    if existing_session and not existing_session.get("title"):
+        set_fields["title"] = auto_title(payload.text)
     await db.sessions.update_one(
         {"id": session_id, "user_id": user["id"]},
-        {"$set": {
-            "id": session_id, "user_id": user["id"], "mode": payload.mode,
-            "last_message": reply[:160], "last_emotion": emotion,
-            "updated_at": now_iso(),
-        }, "$setOnInsert": {"created_at": now_iso()}},
+        {"$set": set_fields, "$setOnInsert": set_on_insert},
         upsert=True,
     )
 
@@ -317,12 +324,18 @@ async def chat_voice(
         "mode": mode, "created_at": now_iso(),
     })
 
+    existing_session = await db.sessions.find_one({"id": sid, "user_id": user["id"]}, {"_id": 0, "title": 1})
+    set_fields = {
+        "id": sid, "user_id": user["id"], "mode": mode,
+        "last_message": reply[:160], "last_emotion": emotion,
+        "updated_at": now_iso(), "channel": "web",
+    }
+    set_on_insert = {"created_at": now_iso(), "title": auto_title(text)}
+    if existing_session and not existing_session.get("title"):
+        set_fields["title"] = auto_title(text)
     await db.sessions.update_one(
         {"id": sid, "user_id": user["id"]},
-        {"$set": {"id": sid, "user_id": user["id"], "mode": mode,
-                  "last_message": reply[:160], "last_emotion": emotion,
-                  "updated_at": now_iso()},
-         "$setOnInsert": {"created_at": now_iso()}},
+        {"$set": set_fields, "$setOnInsert": set_on_insert},
         upsert=True,
     )
 
@@ -345,11 +358,29 @@ async def chat_voice(
 
 
 @api.get("/chat/sessions")
-async def list_sessions(user: dict = Depends(current_user)):
-    docs = await db.sessions.find(
-        {"user_id": user["id"]}, {"_id": 0}
-    ).sort("updated_at", -1).to_list(100)
+async def list_sessions(user: dict = Depends(current_user), q: Optional[str] = None):
+    query = {"user_id": user["id"]}
+    if q:
+        query["$or"] = [
+            {"title": {"$regex": q, "$options": "i"}},
+            {"last_message": {"$regex": q, "$options": "i"}},
+        ]
+    docs = await db.sessions.find(query, {"_id": 0}).sort("updated_at", -1).to_list(200)
     return docs
+
+
+@api.patch("/chat/sessions/{session_id}")
+async def rename_session(session_id: str, payload: dict, user: dict = Depends(current_user)):
+    title = (payload.get("title") or "").strip()[:120]
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be empty")
+    res = await db.sessions.update_one(
+        {"id": session_id, "user_id": user["id"]},
+        {"$set": {"title": title, "updated_at": now_iso()}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"ok": True, "title": title}
 
 
 @api.get("/chat/sessions/{session_id}/messages")
@@ -646,6 +677,21 @@ async def crisis_resources():
     return get_crisis_resources()
 
 
+# ---- Telegram public info ----
+@api.get("/integrations/telegram")
+async def telegram_info():
+    username = getattr(app.state, "tg_bot_username", None)
+    name = os.environ.get("TELEGRAM_BOT_NAME", "VentBuddy")
+    if not username:
+        return {"enabled": False, "name": name}
+    return {
+        "enabled": True,
+        "name": name,
+        "username": username,
+        "url": f"https://t.me/{username}",
+    }
+
+
 # ---- Health ----
 @api.get("/")
 async def root():
@@ -671,6 +717,7 @@ logger = logging.getLogger("mindful")
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
+    await db.users.create_index("telegram_chat_id", sparse=True)
     await db.messages.create_index([("user_id", 1), ("session_id", 1), ("created_at", 1)])
     await db.sessions.create_index([("user_id", 1), ("updated_at", -1)])
     await db.moods.create_index([("user_id", 1), ("created_at", -1)])
@@ -681,7 +728,33 @@ async def on_startup():
     await seed_admin(db)
     logger.info("Mindful Companion ready")
 
+    # Launch Telegram bot (long polling) in the background
+    if os.environ.get("TELEGRAM_TOKEN"):
+        try:
+            tg_app = build_tg_app(db, EMERGENT_KEY)
+            await tg_app.initialize()
+            await tg_app.start()
+            await tg_app.updater.start_polling(drop_pending_updates=True)
+            app.state.tg_app = tg_app
+            try:
+                me = await tg_app.bot.get_me()
+                app.state.tg_bot_username = me.username
+                logger.info(f"VentBuddy Telegram bot polling as @{me.username}")
+            except Exception:
+                logger.exception("Could not fetch bot info")
+                logger.info("VentBuddy Telegram bot polling")
+        except Exception:
+            logger.exception("Failed to start Telegram bot")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    tg_app = getattr(app.state, "tg_app", None)
+    if tg_app is not None:
+        try:
+            await tg_app.updater.stop()
+            await tg_app.stop()
+            await tg_app.shutdown()
+        except Exception:
+            logger.exception("Error stopping Telegram bot")
     client.close()

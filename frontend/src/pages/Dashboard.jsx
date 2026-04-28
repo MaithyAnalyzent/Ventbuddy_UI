@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   ChatCircleDots, Heart, NotePencil, Leaf, Wind, Moon, ClipboardText, Sparkle,
+  PaperPlaneTilt,
 } from "@phosphor-icons/react";
 
 export default function Dashboard() {
@@ -12,6 +13,7 @@ export default function Dashboard() {
   const [checkin, setCheckin] = useState(null);
   const [feeling, setFeeling] = useState("");
   const [trends, setTrends] = useState(null);
+  const [tg, setTg] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -22,6 +24,10 @@ export default function Dashboard() {
       try {
         const { data } = await api.get("/mood/trends");
         setTrends(data);
+      } catch {}
+      try {
+        const { data } = await api.get("/integrations/telegram");
+        setTg(data);
       } catch {}
     })();
   }, []);
@@ -123,6 +129,32 @@ export default function Dashboard() {
         <ActionTile to="/habits" icon={Leaf} title="Tiny habits" desc="Sleep, water, gratitude." testId="action-habits" />
         <ActionTile to="/sleep" icon={Moon} title="Sleep mode" desc="For overthinking nights." testId="action-sleep" />
       </div>
+
+      {/* Telegram callout */}
+      {tg?.enabled && (
+        <div data-testid="telegram-callout" className="bento-card p-6 sm:p-7 flex flex-col sm:flex-row items-start sm:items-center gap-5 bg-gradient-to-br from-sand-50 to-sage-100/50">
+          <div className="w-12 h-12 rounded-2xl bg-sage-400 grid place-items-center shrink-0">
+            <PaperPlaneTilt weight="duotone" size={24} className="text-sand-50" />
+          </div>
+          <div className="flex-1">
+            <span className="text-xs font-semibold uppercase tracking-[0.2em] text-sage-700">Available on Telegram</span>
+            <h3 className="font-heading text-xl font-medium text-ink-900 mt-1">Chat with {tg.name} anytime</h3>
+            <p className="text-sm text-ink-600 mt-1 leading-relaxed">
+              Talk to Mindful inside Telegram — text or voice notes. Same warm companion, in your pocket.
+            </p>
+          </div>
+          <a
+            href={tg.url}
+            target="_blank"
+            rel="noreferrer"
+            data-testid="telegram-open-button"
+            className="inline-flex items-center gap-2 bg-ink-900 text-sand-50 hover:bg-ink-900/90 rounded-full px-5 h-11 font-medium text-sm shrink-0"
+          >
+            Open in Telegram
+            <PaperPlaneTilt weight="fill" size={16} />
+          </a>
+        </div>
+      )}
     </div>
   );
 }
