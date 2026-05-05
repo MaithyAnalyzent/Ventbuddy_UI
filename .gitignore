@@ -16,6 +16,10 @@ node_modules/
 !.yarn/releases
 !.yarn/versions
 
+# Allow frontend node_modules to be tracked
+!frontend/node_modules/
+!frontend/node_modules/**
+
 # Testing
 /coverage
 
